@@ -1,0 +1,141 @@
+import requests
+import sqlite3
+import time
+from datetime import datetime
+
+EXCLUIR_NOMES = [
+    "IGREJA", "TEMPLO", "PAROQUIA", "DIOCESE", "MINISTERIO",
+    "ASSOCIACAO", "FUNDACAO", "SINDICATO", "COOPERATIVA",
+    "COOP", "ONG", "INSTITUTO", "PREFEITURA", "CAMARA",
+    "TRIBUNAL", "SECRETARIA", "CARTORIO", "TABELIONATO",
+    "ESCOLA ESTADUAL", "ESCOLA MUNICIPAL", "POSTO DE SAUDE"
+]
+
+def criar_pipeline_db():
+    conn = sqlite3.connect("pipeline.db")
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS empresas (
+            cnpj TEXT PRIMARY KEY,
+            nome TEXT,
+            uf TEXT,
+            municipio TEXT,
+            capital_social REAL,
+            data_abertura TEXT,
+            porte TEXT,
+            natureza_juridica TEXT,
+            situacao TEXT,
+            cnae TEXT,
+            cnae_descricao TEXT,
+            score INTEGER DEFAULT 0
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def buscar_brasilapi(cnpj):
+    cnpj_limpo = cnpj.replace(".", "").replace("/", "").replace("-", "").strip()
+    try:
+        r = requests.get(
+            f"https://brasilapi.com.br/api/cnpj/v1/{cnpj_limpo}",
+            timeout=10
+        )
+        if r.status_code == 200:
+            return r.json()
+    except:
+        pass
+    return None
+
+def tem_perfil_ma(dados):
+    if not dados or not dados.get("razao_social"):
+        return False
+
+    nome = dados.get("razao_social", "").upper()
+    if any(palavra in nome for palavra in EXCLUIR_NOMES):
+        return False
+
+    situacao = dados.get("descricao_situacao_cadastral", "").upper()
+    if situacao != "ATIVA":
+        return False
+
+    porte = dados.get("porte", "").upper()
+    if porte != "DEMAIS":
+        return False
+
+    data = dados.get("data_inicio_atividade", "")
+    if not data or len(data) < 4:
+        return False
+    try:
+        idade = datetime.now().year - int(data[:4])
+        if idade < 10:
+            return False
+    except:
+        return False
+
+    return True
+
+def salvar_empresa(dados):
+    conn = sqlite3.connect("pipeline.db")
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            INSERT OR IGNORE INTO empresas
+            (cnpj, nome, uf, municipio, capital_social, data_abertura,
+             porte, natureza_juridica, situacao, cnae, cnae_descricao)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            dados.get("cnpj", ""),
+            dados.get("razao_social", ""),
+            dados.get("uf", ""),
+            dados.get("municipio", ""),
+            dados.get("capital_social", 0) or 0,
+            dados.get("data_inicio_atividade", ""),
+            dados.get("porte", ""),
+            dados.get("natureza_juridica", ""),
+            dados.get("descricao_situacao_cadastral", ""),
+            dados.get("cnae_fiscal", ""),
+            dados.get("cnae_fiscal_descricao", "")
+        ))
+        conn.commit()
+        return cursor.rowcount > 0
+    except:
+        return False
+    finally:
+        conn.close()
+
+def rodar_filtragem():
+    criar_pipeline_db()
+
+    # Busca todos os CNPJs do banco raw
+    conn = sqlite3.connect("cnpjs_raw.db")
+    cnpjs = conn.execute("SELECT cnpj, nome FROM cnpjs").fetchall()
+    conn.close()
+
+    total = len(cnpjs)
+    salvos = 0
+    descartados = 0
+
+    print(f"Filtrando {total} CNPJs com critérios de M&A...")
+    print("Isso vai demorar cerca de 45-60 minutos.\n")
+
+    for i, (cnpj, nome) in enumerate(cnpjs):
+        # Progresso a cada 100 empresas
+        if i % 100 == 0:
+            print(f"Progresso: {i}/{total} | Aprovadas: {salvos} | Descartadas: {descartados}")
+
+        dados = buscar_brasilapi(cnpj)
+        if tem_perfil_ma(dados):
+            if salvar_empresa(dados):
+                salvos += 1
+                print(f"  ✓ [{salvos}] {dados['razao_social'][:50]} | {dados.get('porte')} | {dados.get('data_inicio_atividade','')[:4]}")
+        else:
+            descartados += 1
+
+        time.sleep(0.3)
+
+    print(f"\nFiltragem finalizada!")
+    print(f"Total consultado: {total}")
+    print(f"Aprovadas (perfil M&A): {salvos}")
+    print(f"Descartadas: {descartados}")
+
+rodar_filtragem()
