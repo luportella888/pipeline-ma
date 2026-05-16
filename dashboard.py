@@ -74,7 +74,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-@st.cache_data(ttl=300)
 def carregar_dados():
     conn = sqlite3.connect("pipeline.db")
     df = pd.read_sql_query("""
